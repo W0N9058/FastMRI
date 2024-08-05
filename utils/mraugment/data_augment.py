@@ -241,6 +241,7 @@ class DataAugmentor:
         if self.aug_on:
             p = self.schedule_p()
             self.augmentation_pipeline.set_augmentation_strength(p)
+            print(f'Augmentation strength: {p}')
         else:
             p = 0.0
         

@@ -35,9 +35,9 @@ def parse():
 
     # MRAugment specific arguments #################################
     parser.add_argument('--aug_on', default=True, action='store_true', help='This switch turns data augmentation on.')
-    parser.add_argument('--aug_schedule', type=str, default='exp', help='Type of data augmentation strength scheduling. Options: constant, ramp, exp')
+    parser.add_argument('--aug_schedule', type=str, default='constant', help='Type of data augmentation strength scheduling. Options: constant, ramp, exp')
     parser.add_argument('--aug_delay', type=int, default=0, help='Number of epochs at the beginning of training without data augmentation.')
-    parser.add_argument('--aug_strength', type=float, default=0.0, help='Augmentation strength')
+    parser.add_argument('--aug_strength', type=float, default=10.0, help='Augmentation strength')
     parser.add_argument('--aug_exp_decay', type=float, default=5.0, help='Exponential decay coefficient')
     parser.add_argument('--aug_interpolation_order', type=int, default=1, help='Order of interpolation filter used in data augmentation')
     parser.add_argument('--aug_upsample', default=False, action='store_true', help='Set to upsample before augmentation to avoid aliasing artifacts.')

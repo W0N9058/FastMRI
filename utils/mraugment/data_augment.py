@@ -39,6 +39,9 @@ class AugmentationPipeline:
         # Trailing dims must be image height and width (for torchvision) 
         im = complex_channel_first(im)
         
+        
+        original_shape = im.shape[-2:]  # Keep the original shape for resizing back
+
         # ---------------------------  
         # pixel preserving transforms
         # ---------------------------  
@@ -132,13 +135,19 @@ class AugmentationPipeline:
         # Reset original channel ordering
         im = complex_channel_last(im)
         
+        original_shape = im.shape[-2:]  # Keep the original shape for resizing back
+
+        
         return im
     
     def augment_from_kspace(self, kspace, target_size, max_train_size=None):       
         im = ifft2c(kspace) 
+        original_shape = im.shape[-2:]
         im = self.augment_image(im, max_output_size=max_train_size)
         target = self.im_to_target(im, target_size)
         kspace = fft2c(im)
+        kspace = TF.resize(kspace, size=original_shape, interpolation=TF.InterpolationMode.BILINEAR)  # Ensure kspace shape matches
+
         return kspace, target
     
     def im_to_target(self, im, target_size):     
@@ -215,31 +224,45 @@ class DataAugmentor:
     to the training data.
     """
         
-    def __init__(self, hparams, current_epoch_fn):
+    def __init__(self, hparams, total_epoch):
         """
         hparams: refer to the arguments below in add_augmentation_specific_args
         current_epoch_fn: this function has to return the current epoch as an integer 
         and is used to schedule the augmentation probability.
         """
-        self.current_epoch_fn = current_epoch_fn
+#         self.current_epoch_fn = current_epoch_fn
         self.hparams = hparams
         self.aug_on = hparams.aug_on
+        self.current_epoch = 0  
+        self.total_epoch = total_epoch
+        
+        
         if self.aug_on:
             self.augmentation_pipeline = AugmentationPipeline(hparams)
         self.max_train_resolution = hparams.max_train_resolution
         
+        
+        
+    def set_epoch(self, epoch):
+        self.current_epoch = epoch
+        
+    def print_epoch(self):
+        print(f'Current Epoch: {self.current_epoch} (in data_augment)')
+        
     def __call__(self, kspace, target_size):
         """
         Generates augmented kspace and corresponding augmented target pair.
-        kspace: torch tensor of shape [C, H, W, 2] (multi-coil) or [H, W, 2]
+        kspace: torch tensor of shape [B, C, H, W, 2] (multi-coil) or [B, H, W, 2]
             where last dim is for real/imaginary channels
         target_size: [H, W] shape of the generated augmented target
         """
+        batch_size = kspace.shape[0]
         target = None
         
         # Set augmentation probability
         if self.aug_on:
             p = self.schedule_p()
+#             p = 1.0
             self.augmentation_pipeline.set_augmentation_strength(p)
             print(f'Augmentation strength: {p}')
         else:
@@ -247,25 +270,37 @@ class DataAugmentor:
         
         # Augment if needed
         if self.aug_on and p > 0.0:
-            kspace, target = self.augmentation_pipeline.augment_from_kspace(kspace,
-                                                                          target_size=target_size,
-                                                                          max_train_size=self.max_train_resolution)
+            kspace_list = []
+            target_list = []
+            for i in range(batch_size):
+                kspace_i, target_i = self.augmentation_pipeline.augment_from_kspace(kspace[i],
+                                                                                    target_size=target_size,
+                                                                                    max_train_size=self.max_train_resolution)
+                kspace_list.append(kspace_i)
+                target_list.append(target_i)
+            kspace = torch.stack(kspace_list)
+            target = torch.stack(target_list)
         else:
             # Crop in image space if image is too large
             if self.max_train_resolution is not None:
-                if kspace.shape[-3] > self.max_train_resolution[0] or kspace.shape[-2] > self.max_train_resolution[1]:
-                    im = ifft2c(kspace)
-                    im = complex_crop_if_needed(im, self.max_train_resolution)
-                    kspace = fft2c(im)
-            target = torch.zeros(target_size)
+                kspace_list = []
+                for i in range(batch_size):
+                    if kspace[i].shape[-3] > self.max_train_resolution[0] or kspace[i].shape[-2] > self.max_train_resolution[1]:
+                        im = ifft2c(kspace[i])
+                        im = complex_crop_if_needed(im, self.max_train_resolution)
+                        kspace_i = fft2c(im)
+                        kspace_list.append(kspace_i)
+                    else:
+                        kspace_list.append(kspace[i])
+                kspace = torch.stack(kspace_list)
+            target = torch.zeros((batch_size, *target_size))
                     
         return kspace, target
         
     def schedule_p(self):
         D = self.hparams.aug_delay
-        # T = self.hparams.max_epochs
-        T = self.hparams.num_epochs
-        t = self.current_epoch_fn()
+        T = self.total_epoch
+        t = self.current_epoch  # 현재 에포크를 직접 참조
         p_max = self.hparams.aug_strength
 
         if t < D:
@@ -273,18 +308,20 @@ class DataAugmentor:
         else:
             if self.hparams.aug_schedule == 'constant':
                 p = p_max
+                print('constant')
             elif self.hparams.aug_schedule == 'ramp':
                 p = (t-D)/(T-D) * p_max
             elif self.hparams.aug_schedule == 'exp':
-                c = self.hparams.aug_exp_decay/(T-D) # Decay coefficient
+                c = self.hparams.aug_exp_decay/(T-D)  # Decay coefficient
                 p = p_max/(1-exp(-(T-D)*c))*(1-exp(-(t-D)*c))
+                print('exp')
+            print(f'schedule_p: t={t}, p={p}')  # 디버깅 출력 추가
             return p
-
         
     def add_augmentation_specific_args(parser):
         parser.add_argument(
             '--aug_on', 
-            default=False,
+            default=True,
             help='This switch turns data augmentation on.',
             action='store_true'
         )
@@ -294,7 +331,7 @@ class DataAugmentor:
         parser.add_argument(
             '--aug_schedule', 
             type=str, 
-            default='exp',
+            default='constant',
             help='Type of data augmentation strength scheduling. Options: constant, ramp, exp'
         )
         parser.add_argument(
@@ -306,7 +343,7 @@ class DataAugmentor:
         parser.add_argument(
             '--aug_strength', 
             type=float, 
-            default=0.0, 
+            default=10.0, 
             help='Augmentation strength, combined with --aug_schedule determines the augmentation strength in each epoch'
         )
         parser.add_argument(

@@ -5,8 +5,6 @@ from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 import numpy as np
 
-from utils.data.transforms import get_augmentor
-
 class SliceData(Dataset):
     def __init__(self, root, transform, input_key, target_key, forward=False):
         self.transform = transform
@@ -65,21 +63,15 @@ class SliceData(Dataset):
 
 
 def create_data_loaders(data_path, args, shuffle=False, isforward=False):
-    current_epoch_fn = lambda: 0  # Placeholder, you should use the actual epoch function if available
-    # augmentor = DataAugmentor(args, current_epoch_fn)
-    augmentor = get_augmentor(args, current_epoch_fn)
-    
-    
     if isforward == False:
         max_key_ = args.max_key
         target_key_ = args.target_key
     else:
         max_key_ = -1
         target_key_ = -1
-        
     data_storage = SliceData(
         root=data_path,
-        transform=DataTransform(isforward, max_key_, augmentor=augmentor),
+        transform=DataTransform(isforward, max_key_),
         input_key=args.input_key,
         target_key=target_key_,
         forward = isforward

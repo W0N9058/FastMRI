@@ -2,6 +2,7 @@ import shutil
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import StepLR
 import time
 import requests
 from tqdm import tqdm
@@ -14,18 +15,17 @@ from utils.common.utils import save_reconstructions, ssim_loss
 from utils.common.loss_function import SSIMLoss
 from utils.model.varnet import VarNet
 
+from utils.data.transforms import get_augmentor 
+import pytorch_lightning as pl
+
+
 import os
 
-from utils.mraugment.data_augment import DataAugmentor, AugmentationPipeline
-
-
-def train_epoch(args, epoch, model, data_loader, optimizer, loss_type, augmentor):
+def train_epoch(args, epoch, model, data_loader, optimizer, loss_type):
     model.train()
     start_epoch = start_iter = time.perf_counter()
     len_loader = len(data_loader)
     total_loss = 0.
-    
-    print(f'Training epoch: {epoch}')  # 디버깅 출력 추가
 
     for iter, data in enumerate(data_loader):
         mask, kspace, target, maximum, _, _ = data
@@ -33,20 +33,6 @@ def train_epoch(args, epoch, model, data_loader, optimizer, loss_type, augmentor
         kspace = kspace.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
         maximum = maximum.cuda(non_blocking=True)
-        
-#         print(kspace.shape)
-#         print(target.shape)
-                
-         # Apply augmentation
-        if args.aug_on:
-            augmentor.set_epoch(epoch)
-            kspace, target = augmentor(kspace, target.shape[-2:])
-            target = target.cuda(non_blocking=True)  # augmentor로 반환된 target을 GPU로 옮깁니다.
-            augmentor.print_epoch()
-            
-#         print(kspace.shape)
-#         print(target.shape)
-
 
         output = model(kspace, mask)
         loss = loss_type(output, target, maximum)
@@ -160,27 +146,35 @@ def train(args):
 
     loss_type = SSIMLoss().to(device=device)
     optimizer = torch.optim.Adam(model.parameters(), args.lr)
+    
+    # StepLR 스케줄러 설정: step_size 에포크마다 학습률을 gamma 비율로 감소시킴
+    scheduler = StepLR(optimizer, step_size=10, gamma=0.3)  # 예: 매 10 에포크마다 학습률을 절반으로 감소
+
 
     best_val_loss = 1.
     start_epoch = 0
+    
+    # PyTorch Lightning trainer 초기화
+    # trainer = pl.Trainer(max_epochs=args.num_epochs)
+
+    # DataAugmentor 초기화
+    # current_epoch_fn = lambda: trainer.current_epoch
+    # augmentor = get_augmentor(args, current_epoch_fn)
 
     
     train_loader = create_data_loaders(data_path = args.data_path_train, args = args, shuffle=True)
     val_loader = create_data_loaders(data_path = args.data_path_val, args = args)
-
+    
     val_loss_log = np.empty((0, 2))
-
-    # 하이퍼파라미터 설정 및 DataAugmentor 생성
-    myaugmentor = DataAugmentor(args, total_epoch=args.num_epochs)
     
     for epoch in range(start_epoch, args.num_epochs):
         print(f'Epoch #{epoch:2d} ............... {args.net_name} ...............')
         
-#         myaugmentor.set_epoch(epoch) # 현재 에포크 값을 업데이트합니다.
-#         print(f'Current epoch: {epoch}')  # 디버깅 출력을 추가합니다.
-           
+        # DataAugmentor 초기화 with current epoch
+        current_epoch_fn = lambda epoch=epoch: epoch  # 현재 epoch 값을 반환하도록 current_epoch_fn 설정
+        augmentor = get_augmentor(args, current_epoch_fn)  # 각 epoch마다 DataAugmentor를 초기화
         
-        train_loss, train_time = train_epoch(args, epoch, model, train_loader, optimizer, loss_type, myaugmentor)
+        train_loss, train_time = train_epoch(args, epoch, model, train_loader, optimizer, loss_type)
         val_loss, num_subjects, reconstructions, targets, inputs, val_time = validate(args, model, val_loader)
         
         val_loss_log = np.append(val_loss_log, np.array([[epoch, val_loss]]), axis=0)
@@ -210,4 +204,4 @@ def train(args):
             print(
                 f'ForwardTime = {time.perf_counter() - start:.4f}s',
             )
-            
+        scheduler.step()
